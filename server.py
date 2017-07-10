@@ -21,12 +21,14 @@ class Server:
         self._max_concurrency = max_concurrency
         self._running_cnt = 0
         self._loop = asyncio.get_event_loop()
-        self._task_q = asyncio.Queue(self._max_concurrency, loop=self._loop)
         # _finish_q is used for controling worker concurrency
         # Before a task push into _task_q, push a item into _finish_q,
-        # After a result push into _result_q, pop a item from _finish_q
+        # After a result push into a _result_q, pop a item from _finish_q
+        self._task_q = asyncio.Queue(self._max_concurrency, loop=self._loop)
         self._finish_q = asyncio.Queue(self._max_concurrency, loop=self._loop)
-        self._result_q = asyncio.Queue(self._max_concurrency, loop=self._loop)
+        self._result_q_map = {}
+        self._default_result_q = None
+        #self._result_q = asyncio.Queue(self._max_concurrency, loop=self._loop)
         self._input_endpoint_cnt = 0
         self._output_endpoint_cnt = 0
 
@@ -38,23 +40,27 @@ class Server:
 
     def _check_endpoint(self):
         assert self._input_endpoint_cnt >= 1, "as least must be one input_endpoint"
-        assert self._output_endpoint_cnt == 1, "must be only one output_endpoint"
+        assert self._output_endpoint_cnt >= 1, "as least must be one output_endpoint"
 
     def _check_worker(self):
         assert self._worker is not None, "handle must be set"
 
-    def add_input_endpoint(self, input_endpoint):
+    def add_input_endpoint(self, name, input_endpoint):
         """Bind an input endpoints to server
         """
         assert endpoints.isinputendpoint(input_endpoint), "is not inputendpoint"
-        self._loop.create_task(self.fetch_task(input_endpoint))
+        self._loop.create_task(self.fetch_task(name, input_endpoint))
         self._input_endpoint_cnt += 1
 
-    def add_output_endpoint(self, output_endpoint):
+    def add_output_endpoint(self, name, output_endpoint):
         """Bind an output endpoints to server
         """
         assert endpoints.isoutputendpoint(output_endpoint), "is not outputendpoint"
-        self._loop.create_task(self.send_result(output_endpoint))
+        assert name not in self._result_q_map, "output_endpoint '%s' already exist" % (name,)
+        self._result_q_map[name] = asyncio.Queue(self._max_concurrency, loop=self._loop)
+        if len(self._result_q_map) == 1:
+            self._default_result_q = self._result_q_map[name]
+        self._loop.create_task(self.send_result(self._result_q_map[name], output_endpoint))
         self._output_endpoint_cnt += 1
 
     def _run_as_coroutine(self, func):
@@ -66,14 +72,14 @@ class Server:
             task = await self._task_q.get()
             try:
                 self._running_cnt += 1
-                result = await coro(self, task.get_data())
+                task = await coro(self, task)
                 self._running_cnt -= 1
             except:
                 raise
             else:
-                if result is not None:
-                    task.set_data(result)
-                    await self._result_q.put(task)
+                if task is not None:
+                    result_q = task.get_to()
+                    await self._result_q_map.get(result_q, self._default_result_q).put(task)
             finally:
                 await self._finish_q.get()
         return worker
@@ -135,19 +141,20 @@ class Server:
     def add_worker(self, worker):
         self._loop.create_task(worker(self))
 
-    async def fetch_task(self, input_endpoint):
+    async def fetch_task(self, name, input_endpoint):
         executor = concurrent.futures.ThreadPoolExecutor()
         while True:
             future = self._loop.run_in_executor(executor, input_endpoint.get)
             task = await future
+            task._set_from(name)
             await self._finish_q.put(True)
             await self._task_q.put(task)
             self._loop.create_task(self._worker())
 
-    async def send_result(self, output_endpoint):
+    async def send_result(self, result_q, output_endpoint):
         executor = concurrent.futures.ThreadPoolExecutor()
         while True:
-            task = await self._result_q.get()
+            task = await result_q.get()
             future = self._loop.run_in_executor(executor, output_endpoint.put, task)
             await future
 

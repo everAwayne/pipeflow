@@ -10,4 +10,5 @@ from .server import *
 
 __all__ = [error.__all__ +
            endpoints.__all__ +
+           tasks.__all__ +
            server.__all__]
