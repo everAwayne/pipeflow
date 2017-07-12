@@ -1,18 +1,28 @@
 import redis
+import asyncio
 from . import error
 from . import tasks
 from .clients import RedisMQClient
 
 
-__all__ = ['RedisInputEndpoint', 'RedisOutputEndpoint']
+__all__ = ['QueueInputEndpoint', 'QueueOutputEndpoint',
+           'RedisInputEndpoint', 'RedisOutputEndpoint']
 
 
 def isinputendpoint(obj):
-    return isinstance(obj, AbstractInputEndpoint)
+    return isinstance(obj, (AbstractInputEndpoint, AbstractCoroutineInputEndpoint))
 
 
 def isoutputendpoint(obj):
-    return isinstance(obj, AbstractOutputEndpoint)
+    return isinstance(obj, (AbstractOutputEndpoint, AbstractCoroutineOutputEndpoint))
+
+
+def iscoroutineinputendpoint(obj):
+    return isinstance(obj, AbstractCoroutineInputEndpoint)
+
+
+def iscoroutineoutputendpoint(obj):
+    return isinstance(obj, AbstractCoroutineOutputEndpoint)
 
 
 class AbstractInputEndpoint:
@@ -33,6 +43,56 @@ class AbstractOutputEndpoint:
         """Parse Task object into message and put into queue
         """
         raise NotImplementedError
+
+
+class AbstractCoroutineInputEndpoint:
+    """Abstract coroutine input endpoint"""
+
+    async def get(self):
+        """Get a message from queue and parse message into a Task object
+
+        Return a Task object, or raise its exception
+        """
+        raise NotImplementedError
+
+
+class AbstractCoroutineOutputEndpoint:
+    """Abstract coroutine output endpoint"""
+
+    async def put(self, task):
+        """Parse Task object into message and put into queue
+        """
+        raise NotImplementedError
+
+
+class QueueInputEndpoint(AbstractCoroutineInputEndpoint):
+    """Queue input endpoint"""
+
+    def __init__(self, queue):
+        if queue is None:
+            raise ValueError("queue must be not None")
+        assert isinstance(queue, asyncio.Queue), "queue must be an isinstance of asyncio.Queue"
+        self._queue = queue
+
+    async def get(self):
+        msg = await self._queue.get()
+        task = tasks.Task(msg)
+        return task
+
+
+class QueueOutputEndpoint(AbstractCoroutineOutputEndpoint):
+    """Queue output endpoint"""
+
+    def __init__(self, queue):
+        if queue is None:
+            raise ValueError("queue must be not None")
+        assert isinstance(queue, asyncio.Queue), "queue must be an isinstance of asyncio.Queue"
+        self._queue = queue
+
+    async def put(self, task):
+        msg = task.get_data()
+        await self._queue.put(msg)
+        return True
 
 
 class RedisInputEndpoint(RedisMQClient, AbstractInputEndpoint):
@@ -69,10 +129,13 @@ class RedisInputEndpoint(RedisMQClient, AbstractInputEndpoint):
 class RedisOutputEndpoint(RedisMQClient, AbstractOutputEndpoint):
     """Redis output endpoint"""
 
-    def __init__(self, queue_name, **conf):
+    def __init__(self, queue_name, direction="left", **conf):
         if queue_name is None:
             raise ValueError("queue_name must be not None")
+        if direction not in ["left", "right"]:
+            raise ValueError("invalid direction")
         self._queue_name = queue_name
+        self._direction = direction
         super(RedisOutputEndpoint, self).__init__(**conf)
 
     def put(self, task):
@@ -86,7 +149,10 @@ class RedisOutputEndpoint(RedisMQClient, AbstractOutputEndpoint):
         Use lpush
         """
         try:
-            self._client.lpush(queue_name, msg)
+            if self._direction == "left":
+                self._client.lpush(queue_name, msg)
+            else:
+                self._client.rpush(queue_name, msg)
         except redis.ConnectionError as e:
             raise error.MQClientConnectionError()
         except redis.TimeoutError as e:

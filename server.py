@@ -2,6 +2,7 @@ import functools
 import asyncio
 import concurrent.futures
 from . import endpoints
+from . import tasks
 try:
     import uvloop
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -28,7 +29,7 @@ class Server:
         self._finish_q = asyncio.Queue(self._max_concurrency, loop=self._loop)
         self._result_q_map = {}
         self._default_result_q = None
-        #self._result_q = asyncio.Queue(self._max_concurrency, loop=self._loop)
+        self._endpoint_map = {}
         self._input_endpoint_cnt = 0
         self._output_endpoint_cnt = 0
 
@@ -49,19 +50,41 @@ class Server:
         """Bind an input endpoints to server
         """
         assert endpoints.isinputendpoint(input_endpoint), "is not inputendpoint"
+        self._add_endpoint(name)
         self._loop.create_task(self.fetch_task(name, input_endpoint))
         self._input_endpoint_cnt += 1
 
-    def add_output_endpoint(self, name, output_endpoint):
+    def add_output_endpoint(self, name, output_endpoint, buffer_size=None):
         """Bind an output endpoints to server
         """
         assert endpoints.isoutputendpoint(output_endpoint), "is not outputendpoint"
-        assert name not in self._result_q_map, "output_endpoint '%s' already exist" % (name,)
-        self._result_q_map[name] = asyncio.Queue(self._max_concurrency, loop=self._loop)
+        self._add_endpoint(name)
+        self._result_q_map[name] = asyncio.Queue(
+                buffer_size if buffer_size else self._max_concurrency, loop=self._loop)
         if len(self._result_q_map) == 1:
             self._default_result_q = self._result_q_map[name]
-        self._loop.create_task(self.send_result(self._result_q_map[name], output_endpoint))
+        self._loop.create_task(self.send_result(name, self._result_q_map[name], output_endpoint))
         self._output_endpoint_cnt += 1
+
+    def _add_endpoint(self, name):
+        assert name not in self._endpoint_map, "endpoint '%s' already exist" % (name,)
+        self._endpoint_map[name] = None
+
+    def suspend_endpoint(self, name):
+        """Suspend corresponding endpoint
+        """
+        assert name in self._endpoint_map, "corresponding endpoint isn't bound to the server"
+        if self._endpoint_map.get(name) is None:
+            self._endpoint_map[name] = asyncio.Event()
+        self._endpoint_map[name].clear()
+
+    def resume_endpoint(self, name):
+        """Resume corresponding endpoint
+        """
+        assert name in self._endpoint_map, "corresponding endpoint isn't bound to the server"
+        if self._endpoint_map.get(name) is not None:
+            self._endpoint_map[name].set()
+            self._endpoint_map[name] = None
 
     def _run_as_coroutine(self, func):
         """ Wrap func into coroutine, func will run as a coroutine
@@ -73,13 +96,19 @@ class Server:
             try:
                 self._running_cnt += 1
                 task = await coro(self, task)
-                self._running_cnt -= 1
             except:
+                self._running_cnt -= 1
                 raise
             else:
+                self._running_cnt -= 1
                 if task is not None:
-                    result_q = task.get_to()
-                    await self._result_q_map.get(result_q, self._default_result_q).put(task)
+                    if isinstance(task, tasks.Task):
+                        result_q = task.get_to()
+                        await self._result_q_map.get(result_q, self._default_result_q).put(task)
+                    else:
+                        for t in task:
+                            result_q = t.get_to()
+                            await self._result_q_map.get(result_q, self._default_result_q).put(t)
             finally:
                 await self._finish_q.get()
         return worker
@@ -138,25 +167,47 @@ class Server:
         else:
             raise ValueError("the value of run_type is not supported")
 
-    def add_worker(self, worker):
-        self._loop.create_task(worker(self))
+    def add_worker(self, worker, *args, **kw):
+        self._loop.create_task(worker(self, *args, **kw))
 
     async def fetch_task(self, name, input_endpoint):
-        executor = concurrent.futures.ThreadPoolExecutor()
+        """Fetch task from input_endpoint, and put into task queue_name.
+
+        If input_endpoint doesn's support coroutine, executor in thread.
+        """
+        is_coroutine = endpoints.iscoroutineinputendpoint(input_endpoint)
+        if not is_coroutine:
+            executor = concurrent.futures.ThreadPoolExecutor()
         while True:
-            future = self._loop.run_in_executor(executor, input_endpoint.get)
-            task = await future
+            if self._endpoint_map[name] is not None:
+                await self._endpoint_map[name].wait()
+            if is_coroutine:
+                task = await input_endpoint.get()
+            else:
+                future = self._loop.run_in_executor(executor, input_endpoint.get)
+                task = await future
             task._set_from(name)
             await self._finish_q.put(True)
             await self._task_q.put(task)
             self._loop.create_task(self._worker())
 
-    async def send_result(self, result_q, output_endpoint):
-        executor = concurrent.futures.ThreadPoolExecutor()
+    async def send_result(self, name, result_q, output_endpoint):
+        """Get task from result queue, and put into output_endpoint.
+
+        If output_endpoint doesn's support coroutine, executor in thread.
+        """
+        is_coroutine = endpoints.iscoroutineoutputendpoint(output_endpoint)
+        if not is_coroutine:
+            executor = concurrent.futures.ThreadPoolExecutor()
         while True:
+            if self._endpoint_map[name] is not None:
+                await self._endpoint_map[name].wait()
             task = await result_q.get()
-            future = self._loop.run_in_executor(executor, output_endpoint.put, task)
-            await future
+            if is_coroutine:
+                await output_endpoint.put(task)
+            else:
+                future = self._loop.run_in_executor(executor, output_endpoint.put, task)
+                await future
 
     def run(self):
         """Start the server
