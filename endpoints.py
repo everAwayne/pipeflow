@@ -3,6 +3,7 @@ import asyncio
 from . import error
 from . import tasks
 from .clients import RedisMQClient
+from .log import logger
 
 
 __all__ = ['QueueInputEndpoint', 'QueueOutputEndpoint',
@@ -105,7 +106,7 @@ class RedisInputEndpoint(RedisMQClient, AbstractInputEndpoint):
         super(RedisInputEndpoint, self).__init__(**conf)
 
     def get(self):
-        msg = self._get(self._queue_name, 60)
+        msg = self._get(self._queue_name, 20)
         task = tasks.Task(msg)
         return task
 
@@ -119,9 +120,15 @@ class RedisInputEndpoint(RedisMQClient, AbstractInputEndpoint):
                     continue
                 _, raw_data = data
             except redis.ConnectionError as e:
-                raise error.MQClientConnectionError()
+                logger.error('Redis ConnectionError')
+                self._client.connection_pool.disconnect()
+                continue
+                #raise error.MQClientConnectionError()
             except redis.TimeoutError as e:
-                raise error.MQClientTimeoutError()
+                logger.error('Redis TimeoutError')
+                self._client.connection_pool.disconnect()
+                continue
+                #raise error.MQClientTimeoutError()
             else:
                 return raw_data
 
@@ -148,14 +155,21 @@ class RedisOutputEndpoint(RedisMQClient, AbstractOutputEndpoint):
 
         Use lpush
         """
-        try:
-            if self._direction == "left":
-                self._client.lpush(queue_name, msg)
+        while True:
+            try:
+                if self._direction == "left":
+                    self._client.lpush(queue_name, msg)
+                else:
+                    self._client.rpush(queue_name, msg)
+            except redis.ConnectionError as e:
+                logger.error('Redis ConnectionError')
+                self._client.connection_pool.disconnect()
+                continue
+                #raise error.MQClientConnectionError()
+            except redis.TimeoutError as e:
+                logger.error('Redis TimeoutError')
+                self._client.connection_pool.disconnect()
+                continue
+                #raise error.MQClientTimeoutError()
             else:
-                self._client.rpush(queue_name, msg)
-        except redis.ConnectionError as e:
-            raise error.MQClientConnectionError()
-        except redis.TimeoutError as e:
-            raise error.MQClientTimeoutError()
-        else:
-            return True
+                return True
