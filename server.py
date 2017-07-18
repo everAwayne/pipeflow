@@ -3,6 +3,7 @@ import asyncio
 import concurrent.futures
 from . import endpoints
 from . import tasks
+from .log import logger
 try:
     import uvloop
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -14,19 +15,14 @@ __all__ = ['Server']
 
 
 class Server:
-    def __init__(self, max_concurrency=10):
-        if max_concurrency <= 0:
-            raise ValueError("max_concurrency must be greater than 0")
+    def __init__(self, concurrency=10):
+        if concurrency <= 0:
+            raise ValueError("concurrency must be greater than 0")
 
-        self._worker = None
-        self._max_concurrency = max_concurrency
+        self._concurrency = concurrency
         self._running_cnt = 0
         self._loop = asyncio.get_event_loop()
-        # _finish_q is used for controling worker concurrency
-        # Before a task push into _task_q, push a item into _finish_q,
-        # After a result push into a _result_q, pop a item from _finish_q
-        self._task_q = asyncio.Queue(self._max_concurrency, loop=self._loop)
-        self._finish_q = asyncio.Queue(self._max_concurrency, loop=self._loop)
+        self._task_q = asyncio.Queue(self._concurrency, loop=self._loop)
         self._result_q_map = {}
         self._default_result_q = None
         self._endpoint_map = {}
@@ -43,9 +39,6 @@ class Server:
         assert self._input_endpoint_cnt >= 1, "as least must be one input_endpoint"
         assert self._output_endpoint_cnt >= 1, "as least must be one output_endpoint"
 
-    def _check_worker(self):
-        assert self._worker is not None, "handle must be set"
-
     def add_input_endpoint(self, name, input_endpoint):
         """Bind an input endpoints to server
         """
@@ -60,7 +53,7 @@ class Server:
         assert endpoints.isoutputendpoint(output_endpoint), "is not outputendpoint"
         self._add_endpoint(name)
         self._result_q_map[name] = asyncio.Queue(
-                buffer_size if buffer_size else self._max_concurrency, loop=self._loop)
+                buffer_size if buffer_size else self._concurrency, loop=self._loop)
         if len(self._result_q_map) == 1:
             self._default_result_q = self._result_q_map[name]
         self._loop.create_task(self.send_result(name, self._result_q_map[name], output_endpoint))
@@ -92,25 +85,26 @@ class Server:
         @functools.wraps(func)
         async def worker():
             coro = asyncio.coroutines.coroutine(func)
-            task = await self._task_q.get()
-            try:
-                self._running_cnt += 1
-                task = await coro(self, task)
-            except:
-                self._running_cnt -= 1
-                raise
-            else:
-                self._running_cnt -= 1
-                if task is not None:
-                    if isinstance(task, tasks.Task):
-                        result_q = task.get_to()
-                        await self._result_q_map.get(result_q, self._default_result_q).put(task)
-                    else:
-                        for t in task:
-                            result_q = t.get_to()
-                            await self._result_q_map.get(result_q, self._default_result_q).put(t)
-            finally:
-                await self._finish_q.get()
+            while True:
+                task = await self._task_q.get()
+                try:
+                    self._running_cnt += 1
+                    task = await coro(self, task)
+                except Exception as exc:
+                    self._running_cnt -= 1
+                    exc_info = (type(exc), exc, exc.__traceback__)
+                    logger.error("Error occur in handle", exc_info=exc_info)
+                    exc.__traceback__ = None
+                else:
+                    self._running_cnt -= 1
+                    if task is not None:
+                        if isinstance(task, tasks.Task):
+                            result_q = task.get_to()
+                            await self._result_q_map.get(result_q, self._default_result_q).put(task)
+                        else:
+                            for t in task:
+                                result_q = t.get_to()
+                                await self._result_q_map.get(result_q, self._default_result_q).put(t)
         return worker
 
     def _run_as_thread(self, func):
@@ -129,8 +123,6 @@ class Server:
                 if result is not None:
                     task.set_data(result)
                     await self._result_q.put(task)
-            finally:
-                await self._finish_q.get()
         return worker
 
     def _run_as_process(self, func):
@@ -149,8 +141,6 @@ class Server:
                 if result is not None:
                     task.set_data(result)
                     await self._result_q.put(task)
-            finally:
-                await self._finish_q.get()
         return worker
 
     def set_handle(self, handle, run_type="coroutine"):
@@ -159,11 +149,13 @@ class Server:
         For each task, server will create a worker with the handle
         """
         if run_type == "coroutine":
-            self._worker = self._run_as_coroutine(handle)
+            for _ in range(self._concurrency):
+                worker = self._run_as_coroutine(handle)
+                self._loop.create_task(worker())
         #elif run_type == "thread":
-        #    self._worker = self._run_as_thread(handle)
+        #    worker = self._run_as_thread(handle)
         #elif run_type == "process":
-        #    self._worker = self._run_as_process(handle)
+        #    worker = self._run_as_process(handle)
         else:
             raise ValueError("the value of run_type is not supported")
 
@@ -187,9 +179,7 @@ class Server:
                 future = self._loop.run_in_executor(executor, input_endpoint.get)
                 task = await future
             task._set_from(name)
-            await self._finish_q.put(True)
             await self._task_q.put(task)
-            self._loop.create_task(self._worker())
 
     async def send_result(self, name, result_q, output_endpoint):
         """Get task from result queue, and put into output_endpoint.
@@ -213,5 +203,4 @@ class Server:
         """Start the server
         """
         self._check_endpoint()
-        self._check_worker()
         self._loop.run_forever()
