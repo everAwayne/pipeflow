@@ -15,37 +15,53 @@ __all__ = ['Server']
 
 
 class Server:
-    def __init__(self, concurrency=10):
-        if concurrency <= 0:
-            raise ValueError("concurrency must be greater than 0")
-
-        self._concurrency = concurrency
-        self._running_cnt = 0
+    """
+    """
+    def __init__(self):
         self._loop = asyncio.get_event_loop()
-        self._task_q = asyncio.Queue(self._concurrency, loop=self._loop)
-        self._result_q_map = {}
-        self._default_result_q = None
-        self._endpoint_map = {}
-        self._input_endpoint_cnt = 0
-        self._output_endpoint_cnt = 0
+        self._group_map = {}
 
     def get_event_loop(self):
         return self._loop
 
+    def add_group(self, name, concurrency):
+        """
+        """
+        assert name not in self._group_map, "group '%s' already exist" % name
+        if concurrency <= 0:
+            raise ValueError("concurrency must be greater than 0")
+        self._group_map[name] = Group(concurrency, self._loop)
+        return self._group_map[name]
+
+    def add_worker(self, worker, *args, **kw):
+        self._loop.create_task(worker(self, *args, **kw))
+
+    def run(self):
+        """Start the server
+        """
+        self._loop.run_forever()
+
+
+class Group:
+    """
+    """
+    def __init__(self, concurrency, loop):
+        self._concurrency = concurrency
+        self._loop = loop
+        self._running_cnt = 0
+        self._task_q = asyncio.Queue(self._concurrency, loop=self._loop)
+        self._result_q_map = {}
+        self._endpoint_map = {}
+
     def get_running_cnt(self):
         return self._running_cnt
 
-    def _check_endpoint(self):
-        assert self._input_endpoint_cnt >= 1, "as least must be one input_endpoint"
-        assert self._output_endpoint_cnt >= 1, "as least must be one output_endpoint"
-
     def add_input_endpoint(self, name, input_endpoint):
-        """Bind an input endpoints to server
+        """Bind an input endpoints to group
         """
         assert endpoints.isinputendpoint(input_endpoint), "is not inputendpoint"
         self._add_endpoint(name)
         self._loop.create_task(self.fetch_task(name, input_endpoint))
-        self._input_endpoint_cnt += 1
 
     def add_output_endpoint(self, name, output_endpoint, buffer_size=None):
         """Bind an output endpoints to server
@@ -54,13 +70,10 @@ class Server:
         self._add_endpoint(name)
         self._result_q_map[name] = asyncio.Queue(
                 buffer_size if buffer_size else self._concurrency, loop=self._loop)
-        if len(self._result_q_map) == 1:
-            self._default_result_q = self._result_q_map[name]
         self._loop.create_task(self.send_result(name, self._result_q_map[name], output_endpoint))
-        self._output_endpoint_cnt += 1
 
     def _add_endpoint(self, name):
-        assert name not in self._endpoint_map, "endpoint '%s' already exist" % (name,)
+        assert name not in self._endpoint_map, "endpoint '%s' already exist" % name
         self._endpoint_map[name] = None
 
     def suspend_endpoint(self, name):
@@ -100,11 +113,11 @@ class Server:
                     if task is not None:
                         if isinstance(task, tasks.Task):
                             result_q = task.get_to()
-                            await self._result_q_map.get(result_q, self._default_result_q).put(task)
+                            await self._result_q_map[result_q].put(task)
                         else:
                             for t in task:
                                 result_q = t.get_to()
-                                await self._result_q_map.get(result_q, self._default_result_q).put(t)
+                                await self._result_q_map[result_q].put(t)
         return worker
 
     def _run_as_thread(self, func):
@@ -159,9 +172,6 @@ class Server:
         else:
             raise ValueError("the value of run_type is not supported")
 
-    def add_worker(self, worker, *args, **kw):
-        self._loop.create_task(worker(self, *args, **kw))
-
     async def fetch_task(self, name, input_endpoint):
         """Fetch task from input_endpoint, and put into task queue_name.
 
@@ -198,9 +208,3 @@ class Server:
             else:
                 future = self._loop.run_in_executor(executor, output_endpoint.put, task)
                 await future
-
-    def run(self):
-        """Start the server
-        """
-        self._check_endpoint()
-        self._loop.run_forever()
