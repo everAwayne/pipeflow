@@ -203,8 +203,11 @@ class Group:
             if self._endpoint_map[name] is not None:
                 await self._endpoint_map[name].wait()
             task_ls = []
+            task = await result_q.get()
+            task_ls.append(task)
             while not result_q.empty():
-                task_ls.append(await result_q.get())
+                task = await result_q.get()
+                task_ls.append(task)
             if is_coroutine:
                 await output_endpoint.put(task_ls)
             else:
