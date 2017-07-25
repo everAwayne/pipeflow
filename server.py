@@ -52,10 +52,6 @@ class Group:
         self._task_q = asyncio.Queue(self._concurrency, loop=self._loop)
         self._result_q_map = {}
         self._endpoint_map = {}
-        self._cur_concurrency = 0
-
-    def get_cur_concurrency(self):
-        return self._cur_concurrency
 
     def get_running_cnt(self):
         return self._running_cnt
@@ -102,30 +98,26 @@ class Group:
         @functools.wraps(func)
         async def worker():
             coro = asyncio.coroutines.coroutine(func)
-            try:
-                self._cur_concurrency += 1
-                while True:
-                    task = await self._task_q.get()
-                    try:
-                        self._running_cnt += 1
-                        task = await coro(self, task)
-                    except Exception as exc:
-                        self._running_cnt -= 1
-                        exc_info = (type(exc), exc, exc.__traceback__)
-                        logger.error("Error occur in handle", exc_info=exc_info)
-                        exc.__traceback__ = None
-                    else:
-                        self._running_cnt -= 1
-                        if task is not None:
-                            if isinstance(task, tasks.Task):
-                                result_q = task.get_to()
-                                await self._result_q_map[result_q].put(task)
-                            else:
-                                for t in task:
-                                    result_q = t.get_to()
-                                    await self._result_q_map[result_q].put(t)
-            finally:
-                self._cur_concurrency -= 1
+            while True:
+                task = await self._task_q.get()
+                try:
+                    self._running_cnt += 1
+                    task = await coro(self, task)
+                except Exception as exc:
+                    self._running_cnt -= 1
+                    exc_info = (type(exc), exc, exc.__traceback__)
+                    logger.error("Error occur in handle", exc_info=exc_info)
+                    exc.__traceback__ = None
+                else:
+                    self._running_cnt -= 1
+                    if task is not None:
+                        if isinstance(task, tasks.Task):
+                            result_q = task.get_to()
+                            await self._result_q_map[result_q].put(task)
+                        else:
+                            for t in task:
+                                result_q = t.get_to()
+                                await self._result_q_map[result_q].put(t)
         return worker
 
     def _run_as_thread(self, func):
@@ -210,9 +202,11 @@ class Group:
         while True:
             if self._endpoint_map[name] is not None:
                 await self._endpoint_map[name].wait()
-            task = await result_q.get()
+            task_ls = []
+            while not result_q.empty():
+                task_ls.append(await result_q.get())
             if is_coroutine:
-                await output_endpoint.put(task)
+                await output_endpoint.put(task_ls)
             else:
-                future = self._loop.run_in_executor(executor, output_endpoint.put, task)
+                future = self._loop.run_in_executor(executor, output_endpoint.put, task_ls)
                 await future

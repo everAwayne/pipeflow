@@ -90,9 +90,10 @@ class QueueOutputEndpoint(AbstractCoroutineOutputEndpoint):
         assert isinstance(queue, asyncio.Queue), "queue must be an isinstance of asyncio.Queue"
         self._queue = queue
 
-    async def put(self, task):
-        msg = task.get_data()
-        await self._queue.put(msg)
+    async def put(self, tasks):
+        for task in tasks:
+            msg = task.get_data()
+            await self._queue.put(msg)
         return True
 
 
@@ -145,12 +146,14 @@ class RedisOutputEndpoint(RedisMQClient, AbstractOutputEndpoint):
         self._direction = direction
         super(RedisOutputEndpoint, self).__init__(**conf)
 
-    def put(self, task):
-        msg = task.get_data()
-        self._put(self._queue_name, msg)
+    def put(self, tasks):
+        msgs = []
+        for task in tasks:
+            msgs.append(task.get_data())
+        self._put(self._queue_name, msgs)
         return True
 
-    def _put(self, queue_name, msg):
+    def _put(self, queue_name, msgs):
         """Put a message into a list
 
         Use lpush
@@ -158,9 +161,9 @@ class RedisOutputEndpoint(RedisMQClient, AbstractOutputEndpoint):
         while True:
             try:
                 if self._direction == "left":
-                    self._client.lpush(queue_name, msg)
+                    self._client.lpush(queue_name, *msgs)
                 else:
-                    self._client.rpush(queue_name, msg)
+                    self._client.rpush(queue_name, *msgs)
             except redis.ConnectionError as e:
                 logger.error('Redis ConnectionError')
                 self._client.connection_pool.disconnect()
