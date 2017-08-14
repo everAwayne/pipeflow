@@ -179,7 +179,7 @@ class Group:
         """
         is_coroutine = endpoints.iscoroutineinputendpoint(input_endpoint)
         if not is_coroutine:
-            executor = concurrent.futures.ThreadPoolExecutor()
+            executor = concurrent.futures.ThreadPoolExecutor(1)
         while True:
             if self._endpoint_map[name] is not None:
                 await self._endpoint_map[name].wait()
@@ -198,7 +198,7 @@ class Group:
         """
         is_coroutine = endpoints.iscoroutineoutputendpoint(output_endpoint)
         if not is_coroutine:
-            executor = concurrent.futures.ThreadPoolExecutor()
+            executor = concurrent.futures.ThreadPoolExecutor(1)
         while True:
             if self._endpoint_map[name] is not None:
                 await self._endpoint_map[name].wait()
