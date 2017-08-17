@@ -5,7 +5,7 @@ class RedisMQClient:
     """Redis message queue client"""
 
     _keepalive_opt = {
-        socket.TCP_KEEPIDLE: 600,
+        socket.TCP_KEEPIDLE: 60,
         socket.TCP_KEEPCNT: 3,
         socket.TCP_KEEPINTVL: 60,
     }
