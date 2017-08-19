@@ -1,3 +1,4 @@
+import time
 import redis
 import asyncio
 from . import error
@@ -123,6 +124,7 @@ class RedisInputEndpoint(RedisMQClient, AbstractInputEndpoint):
             except redis.ConnectionError as e:
                 logger.error('Redis ConnectionError')
                 self._client.connection_pool.disconnect()
+                time.sleep(5)
                 continue
                 #raise error.MQClientConnectionError()
             except redis.TimeoutError as e:
@@ -167,6 +169,7 @@ class RedisOutputEndpoint(RedisMQClient, AbstractOutputEndpoint):
             except redis.ConnectionError as e:
                 logger.error('Redis ConnectionError')
                 self._client.connection_pool.disconnect()
+                time.sleep(5)
                 continue
                 #raise error.MQClientConnectionError()
             except redis.TimeoutError as e:
