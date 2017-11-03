@@ -127,7 +127,7 @@ class Group:
         async def worker():
             task = await self._task_q.get()
             executor = concurrent.futures.ThreadPoolExecutor()
-            future = self._loop.run_in_executor(executor, func, task.get_data())
+            future = self._loop.run_in_executor(executor, func, task)
             try:
                 result = await future
             except:
@@ -145,7 +145,7 @@ class Group:
         async def worker():
             task = await self._task_q.get()
             executor = concurrent.futures.ProcessPoolExecutor()
-            future = self._loop.run_in_executor(executor, func, task.get_data())
+            future = self._loop.run_in_executor(executor, func, task)
             try:
                 result = await future
             except:
@@ -188,7 +188,7 @@ class Group:
             else:
                 future = self._loop.run_in_executor(executor, input_endpoint.get)
                 task = await future
-            task._set_from(name)
+            task.set_from(name)
             await self._task_q.put(task)
 
     async def send_result(self, name, result_q, output_endpoint):

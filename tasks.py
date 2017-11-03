@@ -21,7 +21,10 @@ class Task:
     def get_data(self):
         return self._data
 
-    def _set_from(self, name):
+    def get_raw_data(self):
+        return self._data
+
+    def set_from(self, name):
         self._from = name
 
     def get_from(self):
