@@ -1,10 +1,11 @@
 import time
 import redis
+import pika
+import aio_pika
 import asyncio
-from . import error
-from . import tasks
-from .clients import RedisMQClient
-from .log import logger
+from ..tasks import Task
+from ..clients import RedisMQClient
+from ..log import logger
 
 
 __all__ = ['QueueInputEndpoint', 'QueueOutputEndpoint',
@@ -78,7 +79,7 @@ class QueueInputEndpoint(AbstractCoroutineInputEndpoint):
 
     async def get(self):
         msg = await self._queue.get()
-        task = tasks.Task(msg)
+        task = Task(msg)
         return task
 
 
@@ -109,7 +110,7 @@ class RedisInputEndpoint(RedisMQClient, AbstractInputEndpoint):
 
     def get(self):
         msg = self._get(self._queue_name, 20)
-        task = tasks.Task(msg)
+        task = Task(msg)
         return task
 
     def _get(self, queue_name, time_out):
