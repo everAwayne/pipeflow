@@ -147,17 +147,21 @@ class TimeInputEndpoint(RedisMQClient, AbstractInputEndpoint):
 class TimeOutputEndpoint(RedisMQClient, AbstractOutputEndpoint):
     """Redis time output endpoint"""
 
-    def __init__(self, queue_name, interval, resolution=60, **conf):
-        if queue_name is None:
-            raise ValueError("queue_name must be not None")
-        self._queue_name = queue_name
-        self._interval = interval
+    def __init__(self, queue_names, resolution=60, **conf):
+        if not isinstance(queue_names, (tuple, list)):
+            raise ValueError("queue_names must be a tuple or a list")
+        self._queue_name_ls = [queue_names] if isinstance(queue_names, tuple) else queue_names
         self._resolution = resolution
         super(TimeOutputEndpoint, self).__init__(**conf)
 
     def put(self, tasks):
-        msgs = [task.get_raw_data() for task in tasks]
-        self._put(self._queue_name, msgs)
+        msg_dct = {}
+        for queue_name, task in tasks:
+            queue_name = queue_name or self._queue_name_ls[0]
+            msg_ls = msg_dct.setdefault(queue_name, [])
+            msg_ls.append(task.get_raw_data())
+        for queue_name in msg_dct:
+            self._put(queue_name, msg_dct[queue_name])
         return True
 
     def _put(self, queue_name, msgs):
@@ -166,8 +170,9 @@ class TimeOutputEndpoint(RedisMQClient, AbstractOutputEndpoint):
         Use lpush
         """
         while True:
-            dest_slice = int(time.time()+self._resolution*self._interval)//self._resolution
-            queue_name = self._queue_name+':'+str(dest_slice)
+            queue_name, interval = queue_name
+            dest_slice = int(time.time()+self._resolution*interval)//self._resolution
+            queue_name = queue_name+':'+str(dest_slice)
             try:
                 self._client.lpush(queue_name, *msgs)
             except redis.ConnectionError as e:
