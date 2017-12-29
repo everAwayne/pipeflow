@@ -8,7 +8,9 @@ from ..clients import RedisMQClient
 from ..log import logger
 
 
-__all__ = ['QueueInputEndpoint', 'QueueOutputEndpoint',
+__all__ = ['AbstractInputEndpoint', 'AbstractOutputEndpoint',
+           'AbstractCoroutineInputEndpoint', 'AbstractCoroutineOutputEndpoint',
+           'QueueInputEndpoint', 'QueueOutputEndpoint',
            'RedisInputEndpoint', 'RedisOutputEndpoint']
 
 
