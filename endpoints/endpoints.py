@@ -182,6 +182,4 @@ class RedisOutputEndpoint(RedisMQClient, AbstractOutputEndpoint):
                 continue
                 #raise error.MQClientTimeoutError()
             else:
-                for task in tasks:
-                    task.confirm()
                 return True

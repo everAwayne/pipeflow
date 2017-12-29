@@ -215,5 +215,7 @@ class Group:
             if is_coroutine:
                 await output_endpoint.put(task_ls)
             else:
+                for queue_name, task in task_ls:
+                    task.confirm()
                 future = self._loop.run_in_executor(executor, output_endpoint.put, task_ls)
                 await future
