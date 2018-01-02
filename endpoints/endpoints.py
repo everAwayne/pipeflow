@@ -8,7 +8,9 @@ from ..clients import RedisMQClient
 from ..log import logger
 
 
-__all__ = ['QueueInputEndpoint', 'QueueOutputEndpoint',
+__all__ = ['AbstractInputEndpoint', 'AbstractOutputEndpoint',
+           'AbstractCoroutineInputEndpoint', 'AbstractCoroutineOutputEndpoint',
+           'QueueInputEndpoint', 'QueueOutputEndpoint',
            'RedisInputEndpoint', 'RedisOutputEndpoint']
 
 
@@ -93,7 +95,7 @@ class QueueOutputEndpoint(AbstractCoroutineOutputEndpoint):
         self._queue = queue
 
     async def put(self, tasks):
-        for task in tasks:
+        for _, task in tasks:
             msg = task.get_raw_data()
             await self._queue.put(msg)
         return True
@@ -140,23 +142,26 @@ class RedisInputEndpoint(RedisMQClient, AbstractInputEndpoint):
 class RedisOutputEndpoint(RedisMQClient, AbstractOutputEndpoint):
     """Redis output endpoint"""
 
-    def __init__(self, queue_name, direction="left", **conf):
-        if queue_name is None:
-            raise ValueError("queue_name must be not None")
+    def __init__(self, queue_names, direction="left", **conf):
+        if not isinstance(queue_names, (str, list)):
+            raise ValueError("queue_names must be a string or a list")
         if direction not in ["left", "right"]:
             raise ValueError("invalid direction")
-        self._queue_name = queue_name
+        self._queue_name_ls = [queue_names] if isinstance(queue_names, str) else queue_names
         self._direction = direction
         super(RedisOutputEndpoint, self).__init__(**conf)
 
     def put(self, tasks):
-        msgs = []
-        for task in tasks:
-            msgs.append(task.get_raw_data())
-        self._put(self._queue_name, msgs)
+        msg_dct = {}
+        for queue_name, task in tasks:
+            queue_name = queue_name or self._queue_name_ls[0]
+            task_ls = msg_dct.setdefault(queue_name, [])
+            task_ls.append(task)
+        for queue_name in msg_dct:
+            self._put(queue_name, msg_dct[queue_name])
         return True
 
-    def _put(self, queue_name, msgs):
+    def _put(self, queue_name, tasks):
         """Put a message into a list
 
         Use lpush
@@ -164,9 +169,9 @@ class RedisOutputEndpoint(RedisMQClient, AbstractOutputEndpoint):
         while True:
             try:
                 if self._direction == "left":
-                    self._client.lpush(queue_name, *msgs)
+                    self._client.lpush(queue_name, *[task.get_raw_data() for task in tasks])
                 else:
-                    self._client.rpush(queue_name, *msgs)
+                    self._client.rpush(queue_name, *[task.get_raw_data() for task in tasks])
             except redis.ConnectionError as e:
                 logger.error('Redis ConnectionError')
                 self._client.connection_pool.disconnect()

@@ -51,6 +51,7 @@ class Group:
         self._running_cnt = 0
         self._task_q = asyncio.Queue(self._concurrency, loop=self._loop)
         self._result_q_map = {}
+        self._output_name_map = {}
         self._endpoint_map = {}
 
     def get_running_cnt(self):
@@ -63,14 +64,17 @@ class Group:
         self._add_endpoint(name)
         self._loop.create_task(self.fetch_task(name, input_endpoint))
 
-    def add_output_endpoint(self, name, output_endpoint, buffer_size=None):
+    def add_output_endpoint(self, name, output_endpoint, queue_name=None, buffer_size=None):
         """Bind an output endpoints to server
         """
         assert endpoints.isoutputendpoint(output_endpoint), "is not outputendpoint"
         self._add_endpoint(name)
-        self._result_q_map[name] = asyncio.Queue(
-                buffer_size if buffer_size else self._concurrency, loop=self._loop)
-        self._loop.create_task(self.send_result(name, self._result_q_map[name], output_endpoint))
+        if output_endpoint not in self._result_q_map:
+            result_q = asyncio.Queue(buffer_size if buffer_size else self._concurrency,
+                                      loop=self._loop)
+            self._result_q_map[output_endpoint] = result_q
+            self._loop.create_task(self.send_result(result_q, output_endpoint))
+        self._output_name_map[name] = (queue_name, self._result_q_map[output_endpoint])
 
     def _add_endpoint(self, name):
         assert name not in self._endpoint_map, "endpoint '%s' already exist" % name
@@ -112,12 +116,14 @@ class Group:
                     self._running_cnt -= 1
                     if task is not None:
                         if isinstance(task, tasks.Task):
-                            result_q = task.get_to()
-                            await self._result_q_map[result_q].put(task)
+                            name = task.get_to()
+                            queue_name, result_q = self._output_name_map[name]
+                            await result_q.put((queue_name, task))
                         else:
                             for t in task:
-                                result_q = t.get_to()
-                                await self._result_q_map[result_q].put(t)
+                                name = t.get_to()
+                                queue_name, result_q = self._output_name_map[name]
+                                await result_q.put((queue_name, t))
         return worker
 
     def _run_as_thread(self, func):
@@ -191,7 +197,7 @@ class Group:
             task.set_from(name)
             await self._task_q.put(task)
 
-    async def send_result(self, name, result_q, output_endpoint):
+    async def send_result(self, result_q, output_endpoint):
         """Get task from result queue, and put into output_endpoint.
 
         If output_endpoint doesn's support coroutine, executor in thread.
@@ -200,8 +206,6 @@ class Group:
         if not is_coroutine:
             executor = concurrent.futures.ThreadPoolExecutor(1)
         while True:
-            if self._endpoint_map[name] is not None:
-                await self._endpoint_map[name].wait()
             task_ls = []
             task = await result_q.get()
             task_ls.append(task)
@@ -211,5 +215,7 @@ class Group:
             if is_coroutine:
                 await output_endpoint.put(task_ls)
             else:
+                for queue_name, task in task_ls:
+                    task.confirm()
                 future = self._loop.run_in_executor(executor, output_endpoint.put, task_ls)
                 await future
