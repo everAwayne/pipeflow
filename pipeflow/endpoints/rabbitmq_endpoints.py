@@ -1,8 +1,7 @@
 import aio_pika
 import asyncio
 import functools
-from .endpoints import AbstractCoroutineInputEndpoint, AbstractCoroutineOutputEndpoint,\
-    AbstractInputEndpoint, AbstractOutputEndpoint
+from .endpoints import AbstractCoroutineInputEndpoint, AbstractCoroutineOutputEndpoint
 from ..tasks import Task
 from ..log import logger
 
@@ -14,7 +13,6 @@ class RabbitMQClient:
     """Rabbitmq client"""
 
     def __init__(self, **conf):
-        #self._conf = {'reconnect_interval': 5}
         self._conf = {}
         self._conf.update(conf)
 
@@ -36,7 +34,7 @@ class RabbitmqInputEndpoint(RabbitMQClient, AbstractCoroutineInputEndpoint):
         if queue_name is None:
             raise ValueError("queue_name must be not None")
         self._queue_name = queue_name
-        self._inner_q = asyncio.Queue(1)
+        self._inner_q = asyncio.Queue(qos)
         super(RabbitmqInputEndpoint, self).__init__(**conf)
         self._loop.run_until_complete(self.initialize())
 
@@ -70,13 +68,11 @@ class RabbitmqInputEndpoint(RabbitMQClient, AbstractCoroutineInputEndpoint):
 class RabbitmqOutputEndpoint(RabbitMQClient, AbstractCoroutineOutputEndpoint):
     """Rabbitmq aio output endpoint"""
 
-    def __init__(self, queue_names, persistent=False, loop=None, **conf):
+    def __init__(self, persistent=False, loop=None, **conf):
         self._loop = loop
         if self._loop is None:
             self._loop = asyncio.get_event_loop()
-        if not isinstance(queue_names, (str, list)):
-            raise ValueError("queue_names must be a string or a list")
-        self._queue_name_ls = [queue_names] if isinstance(queue_names, str) else queue_names
+        self._queue_names = set([])
         self._persistent = persistent
         super(RabbitmqOutputEndpoint, self).__init__(**conf)
         self._loop.run_until_complete(self.initialize())
@@ -86,8 +82,6 @@ class RabbitmqOutputEndpoint(RabbitMQClient, AbstractCoroutineOutputEndpoint):
             try:
                 self._connection = await aio_pika.connect_robust(**self._conf)
                 self._channel = await self._connection.channel()
-                for queue_name in self._queue_name_ls:
-                    await self._channel.declare_queue(queue_name, durable=True)
             except Exception as exc:
                 logger.error("Connect error")
                 logger.error(exc)
@@ -101,12 +95,21 @@ class RabbitmqOutputEndpoint(RabbitMQClient, AbstractCoroutineOutputEndpoint):
     async def _put(self, tasks):
         """Put a message into a list
         """
-        for queue_name, task in tasks:
-            queue_name = queue_name or self._queue_name_ls[0]
+        for params, task in tasks:
+            queue_name = params.get("queue")
+            if not queue_name:
+                continue
             if self._persistent:
                 message = aio_pika.Message(task.get_raw_data(), delivery_mode=aio_pika.DeliveryMode.PERSISTENT)
             else:
                 message = aio_pika.Message(task.get_raw_data())
-            ret = await self._channel.default_exchange.publish(message, routing_key=queue_name)
-            if ret:
-                task.confirm()
+            while True:
+                try:
+                    if queue_name not in self._queue_names:
+                        await self._channel.declare_queue(queue_name, durable=True)
+                        self._queue_names.add(queue_name)
+                    ret = await self._channel.default_exchange.publish(message, routing_key=queue_name)
+                except Exception as exc:
+                    await asyncio.sleep(1)
+                else:
+                    break
