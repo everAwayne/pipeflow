@@ -2,10 +2,10 @@ from setuptools import setup, find_packages
 
 setup(
     name='pypipeflow',
-    version='1.0.0',
+    version='1.0.1',
     author='Awayne',
     author_email='everAwayne@gmail.com',
-    description='A small example package',
+    description='a simple library that you can set up service based on different kinds of MQ',
     long_description_content_type='text/markdown',
     url='https://github.com/everAwayne/pipeflow',
     packages=['pipeflow'],
